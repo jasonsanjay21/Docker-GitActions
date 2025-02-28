@@ -1,0 +1,52 @@
+name: Deploy Docker Image to AWS EC2
+
+on:
+  push:
+    branches:
+      - main  # Run on push to main branch
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Load Secrets
+        run: |
+          echo "$EC2_SECRETS" > secrets.yaml
+        env:
+          EC2_SECRETS: ${{ secrets.EC2_SECRETS }}
+
+      - name: Parse Secrets
+        run: |
+          AWS_EC2_IP=$(yq eval '.AWS_EC2_IP' secrets.yaml)
+          AWS_SSH_USER=$(yq eval '.AWS_SSH_USER' secrets.yaml)
+          echo "AWS_EC2_IP=$AWS_EC2_IP" >> $GITHUB_ENV
+          echo "AWS_SSH_USER=$AWS_SSH_USER" >> $GITHUB_ENV
+          echo "$(yq eval '.AWS_SSH_KEY' secrets.yaml)" > private_key.pem
+          chmod 600 private_key.pem
+        shell: bash
+
+      - name: Build Docker Image
+        run: |
+          docker build -t my-nginx-image .
+
+      - name: Save Docker Image as Tar File
+        run: |
+          docker save -o nginx_image.tar my-nginx-image
+
+      - name: Transfer Image to EC2
+        run: |
+          scp -i private_key.pem -o StrictHostKeyChecking=no nginx_image.tar $AWS_SSH_USER@$AWS_EC2_IP:/home/$AWS_SSH_USER/
+
+      - name: Deploy Docker Image on EC2
+        run: |
+          ssh -i private_key.pem -o StrictHostKeyChecking=no $AWS_SSH_USER@$AWS_EC2_IP << 'EOF'
+          docker load -i nginx_image.tar
+          docker stop nginx-container || true
+          docker rm nginx-container || true
+          docker run -d -p 80:80 --name nginx-container my-nginx-image
+          EOF
