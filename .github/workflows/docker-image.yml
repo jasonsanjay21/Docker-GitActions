@@ -1,56 +1,50 @@
-name: Deploy Docker Image to AWS EC2
+name: Deploy to AWS
 
 on:
   push:
     branches:
-      - main  # Run on push to main branch
-  workflow_dispatch:  # Allow manual trigger
+      - main
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Install Dependencies
+      - name: Set up SSH
         run: |
-          sudo apt-get update && sudo apt-get install -y yq
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.AWS_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Load Secrets
+      - name: Deploy to AWS
         run: |
-          echo "$EC2_SECRETS" > secrets.yaml
-        env:
-          EC2_SECRETS: ${{ secrets.EC2_SECRETS }}
+          ssh ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} << 'EOF'
+            set -e
 
-      - name: Parse Secrets
-        run: |
-          AWS_EC2_IP=$(yq eval -r '.AWS_EC2_IP' secrets.yaml)
-          AWS_SSH_USER=$(yq eval -r '.AWS_SSH_USER' secrets.yaml)
-          echo "AWS_EC2_IP=$AWS_EC2_IP" >> $GITHUB_ENV
-          echo "AWS_SSH_USER=$AWS_SSH_USER" >> $GITHUB_ENV
-          yq eval -r '.AWS_SSH_KEY' secrets.yaml > private_key.pem
-          chmod 600 private_key.pem
-        shell: bash
+            # Update system and install dependencies
+            sudo apt update -y
+            sudo apt install -y docker.io
 
-      - name: Build Docker Image
-        run: |
-          docker build -t my-nginx-image:latest .
+            # Ensure Docker service is running
+            sudo systemctl start docker
+            sudo systemctl enable docker
 
-      - name: Save Docker Image as Tar File
-        run: |
-          docker save -o nginx_image.tar my-nginx-image:latest
+            # Pull the latest code
+            if [ ! -d "app" ]; then
+              git clone https://github.com/jasonsanjay21/DevOpsPF.git app
+            else
+              cd app && git pull origin main
+            fi
+            
+            cd app
 
-      - name: Transfer Image to EC2
-        run: |
-          scp -i private_key.pem -o StrictHostKeyChecking=no nginx_image.tar $AWS_SSH_USER@$AWS_EC2_IP:/home/$AWS_SSH_USER/
-
-      - name: Deploy Docker Image on EC2
-        run: |
-          ssh -i private_key.pem -o StrictHostKeyChecking=no $AWS_SSH_USER@$AWS_EC2_IP << 'EOF'
-          docker load -i nginx_image.tar
-          docker stop nginx-container || true
-          docker rm nginx-container || true
-          docker run -d -p 80:80 --name nginx-container my-nginx-image:latest
+            # Build and run Docker container
+            docker stop myapp || true
+            docker rm myapp || true
+            docker build -t myapp .
+            docker run -d --name myapp -p 80:80 myapp
           EOF
